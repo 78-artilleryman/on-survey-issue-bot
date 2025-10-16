@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: onsurvey-discord-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: LINEAR_API_KEY
+        sync: false
+      - key: LINEAR_TEAM_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /health
+    autoDeploy: true

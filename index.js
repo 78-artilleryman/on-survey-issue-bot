@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { Client, GatewayIntentBits, Partials, Events } = require("discord.js");
 const axios = require("axios");
+const express = require("express");
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
@@ -10,6 +11,13 @@ if (!DISCORD_TOKEN || !LINEAR_API_KEY) {
   console.error("환경 변수 누락: DISCORD_TOKEN, LINEAR_API_KEY 필요");
   process.exit(1);
 }
+
+// Express 서버 설정
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// JSON 파싱 미들웨어
+app.use(express.json());
 
 const client = new Client({
   intents: [
@@ -197,4 +205,75 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
+// Health check 엔드포인트
+app.get("/", (req, res) => {
+  res.json({
+    status: "healthy",
+    botStatus: client.isReady() ? "online" : "offline",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    message: "Discord Issue Bot is running!",
+  });
+});
+
+// Health check for external ping services
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+// API 엔드포인트 (선택사항 - Linear 이슈 생성용)
+app.post("/api/create-issue", async (req, res) => {
+  try {
+    const { title, assigneeName, description, discordUser, discordUrl } =
+      req.body;
+
+    if (!title || !assigneeName) {
+      return res.status(400).json({
+        error: "title과 assigneeName은 필수입니다.",
+      });
+    }
+
+    // 담당자 ID 찾기
+    const assigneeId = await findLinearUserIdByName(assigneeName);
+
+    // 이슈 설명 생성
+    const baseDesc =
+      description || `Discord에서 ${discordUser || "사용자"} 님이 생성`;
+    const fullDesc = discordUrl
+      ? `${baseDesc}\nDiscord URL: ${discordUrl}`
+      : baseDesc;
+
+    // 이슈 생성
+    const issue = await createLinearIssue({
+      title,
+      description: fullDesc,
+      assigneeId,
+    });
+
+    res.json({
+      success: true,
+      issue: {
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        url: issue.url,
+        assignee: issue.assignee,
+      },
+      message: `이슈가 성공적으로 생성되었습니다: ${issue.identifier}`,
+    });
+  } catch (error) {
+    console.error("API 오류:", error);
+    res.status(500).json({
+      error: error.message,
+      success: false,
+    });
+  }
+});
+
+// 서버 시작
+app.listen(PORT, () => {
+  console.log(`Express 서버가 포트 ${PORT}에서 실행 중입니다.`);
+});
+
+// Discord Bot 로그인
 client.login(DISCORD_TOKEN);
