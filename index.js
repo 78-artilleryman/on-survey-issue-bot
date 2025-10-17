@@ -143,9 +143,7 @@ function parseCreateIssueCommand(content) {
   return { title, name };
 }
 
-client.on(Events.ClientReady, () => {
-  console.log(`로그인 성공: ${client.user.tag}`);
-});
+// ClientReady 이벤트는 startServer() 함수에서 처리
 
 client.on(Events.MessageCreate, async (message) => {
   try {
@@ -218,8 +216,35 @@ app.get("/", (req, res) => {
 
 // Health check for external ping services
 app.get("/health", (req, res) => {
-  res.status(200).send("OK");
+  const isBotReady = client.isReady();
+  if (isBotReady) {
+    res.status(200).json({
+      status: "healthy",
+      bot: "online",
+      uptime: Math.floor(process.uptime()),
+    });
+  } else {
+    res.status(503).json({
+      status: "degraded",
+      bot: "offline",
+      message: "Discord bot is not ready",
+    });
+  }
 });
+
+// Render Keep-Alive를 위한 추가 엔드포인트
+app.get("/ping", (req, res) => {
+  res.status(200).json({
+    message: "pong",
+    timestamp: new Date().toISOString(),
+    botStatus: client.isReady() ? "online" : "offline",
+  });
+});
+
+// Keep-Alive를 위한 주기적 ping (5분마다)
+setInterval(() => {
+  console.log("🔄 Keep-Alive ping:", new Date().toISOString());
+}, 5 * 60 * 1000);
 
 // API 엔드포인트 (선택사항 - Linear 이슈 생성용)
 app.post("/api/create-issue", async (req, res) => {
@@ -270,10 +295,83 @@ app.post("/api/create-issue", async (req, res) => {
   }
 });
 
-// 서버 시작
-app.listen(PORT, () => {
-  console.log(`Express 서버가 포트 ${PORT}에서 실행 중입니다.`);
-});
+// Discord Bot 로그인 및 서버 시작
+async function startServer() {
+  try {
+    console.log("🤖 Discord 봇 로그인 시도 중...");
+    console.log("🔍 토큰 길이:", DISCORD_TOKEN ? DISCORD_TOKEN.length : 0);
+    console.log("🌍 환경:", process.env.NODE_ENV || "development");
+    console.log("📡 Render 환경 여부:", process.env.RENDER ? "예" : "아니오");
 
-// Discord Bot 로그인
-client.login(DISCORD_TOKEN);
+    // Discord 봇 이벤트 리스너 설정
+    client.on(Events.ClientReady, () => {
+      console.log(`✅ Discord 봇 로그인 성공: ${client.user.tag}`);
+      console.log(`🆔 봇 ID: ${client.user.id}`);
+      console.log(`📊 봇이 ${client.guilds.cache.size}개의 서버에 참여 중`);
+    });
+
+    client.on(Events.Error, (error) => {
+      console.error("❌ Discord 봇 에러:", error);
+    });
+
+    client.on(Events.Warn, (info) => {
+      console.warn("⚠️ Discord 봇 경고:", info);
+    });
+
+    // Render 무료 플랜 대응: 연결 끊김 시 재연결
+    client.on(Events.ShardDisconnect, (event) => {
+      console.warn("⚠️ Discord 연결 끊김:", event);
+      console.log("🔄 10초 후 재연결 시도...");
+      setTimeout(() => {
+        if (!client.isReady()) {
+          console.log("🔄 재연결 시도 중...");
+          client.login(DISCORD_TOKEN).catch((err) => {
+            console.error("❌ 재연결 실패:", err);
+          });
+        }
+      }, 10000);
+    });
+
+    // 로그인 시도
+    console.log("🔐 Discord API에 연결 시도 중...");
+    await client.login(DISCORD_TOKEN);
+
+    // Discord 봇이 준비될 때까지 대기 (최대 30초)
+    let waitTime = 0;
+    const maxWaitTime = 30000;
+    const checkInterval = 1000;
+
+    while (!client.isReady() && waitTime < maxWaitTime) {
+      await new Promise((resolve) => setTimeout(resolve, checkInterval));
+      waitTime += checkInterval;
+      console.log(`⏳ Discord 봇 준비 대기 중... (${waitTime / 1000}초)`);
+    }
+
+    if (!client.isReady()) {
+      console.warn("⚠️ Discord 봇 로그인 타임아웃, 서버는 시작합니다");
+    }
+
+    // Express 서버 시작
+    app.listen(PORT, () => {
+      console.log(`🌐 Express 서버가 포트 ${PORT}에서 실행 중입니다.`);
+      console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+      console.log("🚀 서버가 성공적으로 시작되었습니다!");
+    });
+
+    // Render Keep-Alive: 5분마다 상태 로그
+    setInterval(() => {
+      console.log(
+        "🔄 Keep-Alive ping:",
+        new Date().toISOString(),
+        "Bot ready:",
+        client.isReady()
+      );
+    }, 5 * 60 * 1000);
+  } catch (error) {
+    console.error("❌ 서버 시작 실패:", error);
+    process.exit(1);
+  }
+}
+
+// 서버 시작
+startServer();
