@@ -2,15 +2,30 @@ require("dotenv").config();
 const { Client, GatewayIntentBits, Partials, Events } = require("discord.js");
 const axios = require("axios");
 const express = require("express");
+const { Client: NotionClient } = require("@notionhq/client");
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
 const LINEAR_TEAM_KEY = process.env.LINEAR_TEAM_KEY; // 선택, 예: ON/ENG 같은 팀 키
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const NOTION_DATABASE_ID = process.env.NOTION_DATABASE_ID;
 
 if (!DISCORD_TOKEN || !LINEAR_API_KEY) {
   console.error("환경 변수 누락: DISCORD_TOKEN, LINEAR_API_KEY 필요");
   process.exit(1);
 }
+
+// Notion 클라이언트 초기화 (토큰이 있는 경우에만)
+const notion = NOTION_TOKEN ? new NotionClient({ auth: NOTION_TOKEN }) : null;
+
+// Discord/Linear 이름 → Notion 이름 매핑
+const notionAssigneeMap = {
+  허자연: "자연 허",
+  윤병현: "병현 윤",
+  김현아: "현아",
+  최윤영: "chldbsdud",
+  김재관: "재관 김",
+};
 
 // Express 서버 설정
 const app = express();
@@ -103,6 +118,112 @@ async function findLinearUserIdByName(name) {
   return partial?.id || null;
 }
 
+// Notion 데이터베이스에 항목 추가
+async function createNotionPage({
+  title,
+  description,
+  assigneeName,
+  linearUrl,
+}) {
+  if (!notion || !NOTION_DATABASE_ID) {
+    console.log("⚠️ Notion 설정이 없어 항목을 추가하지 않습니다.");
+    return null;
+  }
+
+  try {
+    // Notion에서 담당자 찾기 (이름으로 검색)
+    let assigneePerson = null;
+    if (assigneeName) {
+      try {
+        // Notion 사용자 검색 (전체 사용자 목록에서 찾기)
+        const response = await notion.users.list();
+        const users = response.results;
+
+        // 매핑된 이름으로 검색 먼저 시도
+        const mappedName = notionAssigneeMap[assigneeName];
+        const searchNames = mappedName
+          ? [mappedName, assigneeName]
+          : [assigneeName];
+
+        for (const searchName of searchNames) {
+          const matchedUser = users.find(
+            (user) =>
+              user.type === "person" &&
+              user.name &&
+              (user.name === searchName ||
+                user.name.toLowerCase().includes(searchName.toLowerCase()))
+          );
+          if (matchedUser) {
+            assigneePerson = { id: matchedUser.id };
+            console.log(
+              `✅ Notion 담당자 매칭: ${assigneeName} → ${matchedUser.name}`
+            );
+            break;
+          }
+        }
+
+        if (!assigneePerson) {
+          console.log(
+            `⚠️ Notion에서 담당자 '${assigneeName}'을 찾지 못했습니다.`
+          );
+        }
+      } catch (err) {
+        console.log("⚠️ Notion 담당자 검색 실패:", err.message);
+      }
+    }
+
+    // Notion 페이지 생성
+    const properties = {
+      "업무 내용": {
+        title: [{ text: { content: title } }],
+      },
+    };
+
+    // 담당자가 있으면 추가
+    if (assigneePerson) {
+      properties["담당자"] = {
+        people: [assigneePerson],
+      };
+    }
+
+    // Linear URL이 있으면 설명에 추가
+    let pageContent = description || "";
+    if (linearUrl) {
+      pageContent = `${pageContent}\n\nLinear 이슈: ${linearUrl}`;
+    }
+
+    // 페이지 생성
+    const response = await notion.pages.create({
+      parent: { database_id: NOTION_DATABASE_ID },
+      properties: properties,
+      children: pageContent
+        ? [
+            {
+              object: "block",
+              type: "paragraph",
+              paragraph: {
+                rich_text: [
+                  {
+                    type: "text",
+                    text: {
+                      content: pageContent,
+                    },
+                  },
+                ],
+              },
+            },
+          ]
+        : undefined,
+    });
+
+    console.log("✅ Notion 항목 추가 완료:", response.id);
+    return response;
+  } catch (error) {
+    console.error("❌ Notion 항목 추가 실패:", error.message);
+    return null;
+  }
+}
+
 // 이슈 생성
 async function createLinearIssue({ title, description, assigneeId, teamId }) {
   const mutation = `
@@ -192,6 +313,15 @@ client.on(Events.MessageCreate, async (message) => {
       assigneeId,
     });
 
+    // Notion 데이터베이스에도 항목 추가
+    const parsedName = parsed.name;
+    await createNotionPage({
+      title,
+      description: desc,
+      assigneeName: parsedName,
+      linearUrl: issue.url,
+    });
+
     await message.channel.send(
       `이슈가 생성되었습니다: ${issue.identifier} ${issue.url}`
     );
@@ -275,6 +405,14 @@ app.post("/api/create-issue", async (req, res) => {
       assigneeId,
     });
 
+    // Notion 데이터베이스에도 항목 추가
+    await createNotionPage({
+      title,
+      description: fullDesc,
+      assigneeName,
+      linearUrl: issue.url,
+    });
+
     res.json({
       success: true,
       issue: {
@@ -302,6 +440,10 @@ async function startServer() {
     console.log("🔍 토큰 길이:", DISCORD_TOKEN ? DISCORD_TOKEN.length : 0);
     console.log("🌍 환경:", process.env.NODE_ENV || "development");
     console.log("📡 Render 환경 여부:", process.env.RENDER ? "예" : "아니오");
+    console.log("📝 Notion 연동:", NOTION_TOKEN ? "설정됨" : "설정 안됨");
+    if (NOTION_TOKEN) {
+      console.log("📋 Notion 데이터베이스 ID:", NOTION_DATABASE_ID || "없음");
+    }
 
     // Discord 봇 이벤트 리스너 설정
     client.on(Events.ClientReady, () => {
